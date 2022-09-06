@@ -7,6 +7,7 @@ https://github.com/MichSchli/RelationPrediction
 import numpy as np
 import torch
 import dgl
+import logging
 from tqdm import tqdm
 import rgcn.knowledge_graph as knwlgrh
 from collections import defaultdict
@@ -75,6 +76,8 @@ def filter_score_r(test_triples, score, all_ans):
     return score
 
 
+
+
 def r2e(triplets, num_rels):
     src, rel, dst = triplets.transpose()
     # get all relations
@@ -136,6 +139,15 @@ def build_sub_graph(num_nodes, num_rels, triples, use_cuda, gpu):
     return g
 
 def get_total_rank(test_triples, score, all_ans, eval_bz, rel_predict=0):
+    '''
+
+    :param test_triples: triples with inverse relationship.
+    :param score:
+    :param all_ans: dict with [s,o]:rel:[o,s] or [s,o]:[o,s]:rel per timestamp.
+    :param eval_bz: evaluation batch size
+    :param rel_predict: if 1 predicts relations/link prediction otherwise entity prediction.
+    :return:
+    '''
     num_triples = len(test_triples)
     n_batch = (num_triples + eval_bz - 1) // eval_bz
     rank = []
@@ -168,15 +180,23 @@ def get_total_rank(test_triples, score, all_ans, eval_bz, rel_predict=0):
     return filter_mrr.item(), mrr.item(), rank, filter_rank
 
 
-def stat_ranks(rank_list, method):
+def stat_ranks(rank_list, method, log): # added  eval_paper_authors log for logging
     hits = [1, 3, 10]
     total_rank = torch.cat(rank_list)
-
+    mr = torch.mean(total_rank.float()) # added  eval_paper_authors log for MR
     mrr = torch.mean(1.0 / total_rank.float())
+    print("MR ({}): {:.6f}".format(method, mr.item())) # added  eval_paper_authors log for MR
     print("MRR ({}): {:.6f}".format(method, mrr.item()))
+
+    if log: # added  eval_paper_authors log for logging
+        logging.debug("MR ({}): {:.6f}".format(method, mr.item())) # added  eval_paper_authors log for logging
+        logging.debug("MRR ({}): {:.6f}".format(method, mrr.item())) # added  eval_paper_authors log for logging
+
     for hit in hits:
         avg_count = torch.mean((total_rank <= hit).float())
         print("Hits ({}) @ {}: {:.6f}".format(method, hit, avg_count.item()))
+        if log: # added  eval_paper_authors log for logging
+            logging.debug("Hits ({}) @ {}: {:.6f}".format(method, hit, avg_count.item())) # added  eval_paper_authors log for logging
     return mrr
 
 
@@ -252,6 +272,7 @@ def add_object(e1, e2, r, d, num_rel):
     d[e1][r].add(e2)
 
 
+# NEVER Used
 def load_all_answers(total_data, num_rel):
     # store subjects for all (rel, object) queries and
     # objects for all (subject, rel) queries
@@ -261,7 +282,6 @@ def load_all_answers(total_data, num_rel):
         add_subject(s, o, r, all_subjects, num_rel=num_rel)
         add_object(s, o, r, all_objects, num_rel=0)
     return all_objects, all_subjects
-
 
 def load_all_answers_for_filter(total_data, num_rel, rel_p=False):
     # store subjects for all (rel, object) queries and
@@ -332,7 +352,7 @@ def split_by_time(data):
     rels = []
     for snapshot in snapshot_list:
         uniq_v, edges = np.unique((snapshot[:,0], snapshot[:,2]), return_inverse=True)  # relabel
-        uniq_r = np.unique(snapshot[:,1])
+        uniq_r = np.unique(snapshot[:, 1])
         edges = np.reshape(edges, (2, -1))
         nodes.append(len(uniq_v))
         rels.append(len(uniq_r)*2)
@@ -360,7 +380,7 @@ def load_data(dataset, bfs_level=3, relabel=False):
         return knwlgrh.load_entity(dataset, bfs_level, relabel)
     elif dataset in ['FB15k', 'wn18', 'FB15k-237']:
         return knwlgrh.load_link(dataset)
-    elif dataset in ['ICEWS18', 'ICEWS14', "GDELT", "SMALL", "ICEWS14s", "ICEWS05-15","YAGO",
+    elif dataset in ['ICEWS18', 'ICEWS14', "GDELT", "SMALL", "ICEWS14", "ICEWS05-15","YAGO", # removed eval_paper_authors ICEWS14s bec. of renamig
                      "WIKI"]:
         return knwlgrh.load_from_local("../data", dataset)
     else:
@@ -374,9 +394,11 @@ def construct_snap(test_triples, num_nodes, num_rels, final_score, topK):
         for index in top_indices[_]:
             h, r = test_triples[_][0], test_triples[_][1]
             if r < num_rels:
-                predict_triples.append([test_triples[_][0], r, index])
+                predict_triples.append([test_triples[_][0].item(), r.item(), index.item()]) # MODIFIED  eval_paper_authors for memory reasons
+                # predict_triples.append([test_triples[_][0], r, index]) #original version
             else:
-                predict_triples.append([index, r-num_rels, test_triples[_][0]])
+                predict_triples.append([index.item(), r.item()-num_rels, test_triples[_][0].item()]) # MODIFIED  eval_paper_authors for memory reasons
+                # predict_triples.append([index, r-num_rels, test_triples[_][0]])  #original version
 
     # 转化为numpy array
     predict_triples = np.array(predict_triples, dtype=int)

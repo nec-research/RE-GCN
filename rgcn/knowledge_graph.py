@@ -18,7 +18,7 @@ import scipy.sparse as sp
 from dgl.data.utils import download, extract_archive, get_download_dir, _get_dgl_url
 import sys
 
-np.random.seed(123)
+# np.random.seed(123) #MODIFIED  eval_paper_authors
 
 _downlaod_prefix = _get_dgl_url('dataset/')
 
@@ -184,7 +184,6 @@ class RGCNLinkDataset(object):
             self.dir = os.path.join(self.dir, self.name)
             extract_archive(tgz_path, self.dir)
         print(self.dir)
-
 
     def load(self, load_time=True):
         entity_path = os.path.join(self.dir, 'entity2id.txt')

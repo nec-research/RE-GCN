@@ -13,7 +13,7 @@ import os
 import sys
 import time
 import pickle
-
+import logging # eval_paper_authors
 import dgl
 import numpy as np
 import torch
@@ -30,16 +30,18 @@ from rgcn.knowledge_graph import _read_triplets_as_list
 # os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
 
-def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_list, all_ans_r_list, model_name, static_graph, mode):
+def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_list, all_ans_r_list, model_name, static_graph, mode, 
+                log=False,  eval_paper_authors_datasetname='ICEWS18',  eval_paper_authors_multistep_bool=True,  eval_paper_authors_exp_nr=0):
+                # added for logging : eval_paper_authors: log=False,  eval_paper_authors_datasetname='ICEWS18',  eval_paper_authors_multistep_bool=True,  eval_paper_authors_exp_nr=0):
     """
     :param model: model used to test
-    :param history_list:    all input history snap shot list, not include output label train list or valid list
-    :param test_list:   test triple snap shot list
-    :param num_rels:    number of relations
-    :param num_nodes:   number of nodes
+    :param history_list: all input history snap shot list, not include output label train list or valid list
+    :param test_list: test triple snap shot list
+    :param num_rels:  number of relations
+    :param num_nodes: number of nodes
     :param use_cuda:
-    :param all_ans_list:     dict used to calculate filter mrr (key and value are all int variable not tensor)
-    :param all_ans_r_list:     dict used to calculate filter mrr (key and value are all int variable not tensor)
+    :param all_ans_list: dict used to calculate filter mrr (key and value are all int variable not tensor)
+    :param all_ans_r_list: dict used to calculate filter mrr (key and value are all int variable not tensor)
     :param model_name:
     :param static_graph
     :param mode
@@ -59,16 +61,52 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
         print("\n"+"-"*10+"start testing"+"-"*10+"\n")
         model.load_state_dict(checkpoint['state_dict'])
 
+    ### ADDED  eval_paper_authors
+    #for logging scores
+    import inspect
+    import sys
+    import os
+    currentdir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+    # parentdir = os.path.dirname(currentdir)
+    sys.path.insert(1, currentdir) 
+    sys.path.insert(1, os.path.join(sys.path[0], '../..'))        
+    import evaluation_utils 
+    exp_nr = eval_paper_authors_exp_nr #seed
+    if  eval_paper_authors_multistep_bool== True:
+        steps = 'multistep'        
+    else:
+        steps ='singlestep'
+
+    method = 'regcn'
+    filter = 'raw'
+    logname = method + '-' +  eval_paper_authors_datasetname + '-' +str(exp_nr) + '-' +steps + '-' + filter
+    #renet-ICEWS18-multistep-raw-modifiedpredict_xxx_1_3206_6624.pt
+    ## END ADDED  eval_paper_authors
+
     model.eval()
     # do not have inverse relation in test input
     input_list = [snap for snap in history_list[-args.test_history_len:]]
 
+    eval_paper_authors_logging_dict = {}
+    
     for time_idx, test_snap in enumerate(tqdm(test_list)):
+        
         history_glist = [build_sub_graph(num_nodes, num_rels, g, use_cuda, args.gpu) for g in input_list]
         test_triples_input = torch.LongTensor(test_snap).cuda() if use_cuda else torch.LongTensor(test_snap)
         test_triples_input = test_triples_input.to(args.gpu)
         test_triples, final_score, final_r_score = model.predict(history_glist, num_rels, static_graph, test_triples_input, use_cuda)
 
+        ## ADDED  eval_paper_authors
+        # # # logging scores
+        if log == True:
+            for triple, subobscores in zip(test_triples, final_score):
+                quad = triple.tolist()
+                quad.append(time_idx)
+
+                query_name, gt_test_query_ids = evaluation_utils.query_name_from_quadruple(quad, num_rels)
+
+                eval_paper_authors_logging_dict[query_name] = [subobscores.cpu().detach().numpy(), gt_test_query_ids]# list w element 0: scores, element 1:gt 
+        ## END ADDED  eval_paper_authors
         mrr_filter_snap_r, mrr_snap_r, rank_raw_r, rank_filter_r = utils.get_total_rank(test_triples, final_r_score, all_ans_r_list[time_idx], eval_bz=1000, rel_predict=1)
         mrr_filter_snap, mrr_snap, rank_raw, rank_filter = utils.get_total_rank(test_triples, final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
 
@@ -88,7 +126,7 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
         # reconstruct history graph list
         if args.multi_step:
             if not args.relation_evaluation:    
-                predicted_snap = utils.construct_snap(test_triples, num_nodes, num_rels, final_score, args.topk)
+                predicted_snap = utils.construct_snap(test_triples, num_nodes, num_rels, final_score, args.topk) 
             else:
                 predicted_snap = utils.construct_snap_r(test_triples, num_nodes, num_rels, final_r_score, args.topk)
             if len(predicted_snap):
@@ -98,11 +136,23 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
             input_list.pop(0)
             input_list.append(test_snap)
         idx += 1
-    
-    mrr_raw = utils.stat_ranks(ranks_raw, "raw_ent")
-    mrr_filter = utils.stat_ranks(ranks_filter, "filter_ent")
-    mrr_raw_r = utils.stat_ranks(ranks_raw_r, "raw_rel")
-    mrr_filter_r = utils.stat_ranks(ranks_filter_r, "filter_rel")
+    mrr_raw = 0
+    mrr_raw = utils.stat_ranks(ranks_raw, "Entity Prediction Raw", log)
+    mrr_filter = utils.stat_ranks(ranks_filter, "Entity Prediction Filter", log)
+    mrr_raw_r = utils.stat_ranks(ranks_raw_r, "Relation Prediction Raw", log)
+    mrr_filter_r = utils.stat_ranks(ranks_filter_r, "Relation Prediction Filter", log) 
+
+    # eval_paper_authors (logging)
+    if log == True:
+        import pathlib
+        dirname = os.path.join(pathlib.Path().resolve(), 'results' )
+        eval_paper_authorsfilename = os.path.join(dirname, logname + ".pkl")
+        # if not os.path.isfile( eval_paper_authorsfilename):
+        with open( eval_paper_authorsfilename,'wb') as file:
+            pickle.dump( eval_paper_authors_logging_dict, file, protocol=4) 
+        file.close()
+    #END  eval_paper_authors
+
     return mrr_raw, mrr_filter, mrr_raw_r, mrr_filter_r
 
 
@@ -123,6 +173,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     train_list = utils.split_by_time(data.train)
     valid_list = utils.split_by_time(data.valid)
     test_list = utils.split_by_time(data.test)
+    logging.debug('Train: {}\t Valid: {}\t Test: {}'.format(len(data.train), len(data.valid), len(data.test))) #eval_paper_authors logging
 
     num_nodes = data.num_nodes
     num_rels = data.num_rels
@@ -132,10 +183,17 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     all_ans_list_valid = utils.load_all_answers_for_time_filter(data.valid, num_rels, num_nodes, False)
     all_ans_list_r_valid = utils.load_all_answers_for_time_filter(data.valid, num_rels, num_nodes, True)
 
-    model_name = "{}-{}-{}-ly{}-dilate{}-his{}-weight:{}-discount:{}-angle:{}-dp{}|{}|{}|{}-gpu{}"\
-        .format(args.dataset, args.encoder, args.decoder, args.n_layers, args.dilate_len, args.train_history_len, args.weight, args.discount, args.angle,
-                args.dropout, args.input_dropout, args.hidden_dropout, args.feat_dropout, args.gpu)
-    model_state_file = '../models/' + model_name
+    # model_name = "{}-{}-{}-ly{}-dilate{}-his{}-weight:{}-discount:{}-angle:{}-dp{}|{}|{}|{}-gpu{}.pth"\
+    #     .format(args.dataset, args.encoder, args.decoder, args.n_layers, args.dilate_len, args.train_history_len,
+    #             args.weight, args.discount, args.angle, args.dropout, args.input_dropout, args.hidden_dropout,
+    #             args.feat_dropout, args.gpu)
+    model_name = "{}-{}-{}-ly{}-dilate{}-his{}-weight-{}-discount-{}-angle-{}-dp{}-{}-{}-{}-gpu{}-run{}.pth"\
+        .format(args.dataset, args.encoder, args.decoder, args.n_layers, args.dilate_len, args.train_history_len,
+                args.weight, args.discount, args.angle, args.dropout, args.input_dropout, args.hidden_dropout,
+                args.feat_dropout, args.gpu, args.runnr)  # CHANGED  eval_paper_authors to add runnr
+
+
+    model_state_file = os.getcwd()[:-4] + '/models/' + model_name
     print("Sanity Check: stat name : {}".format(model_state_file))
     print("Sanity Check: Is cuda available ? {}".format(torch.cuda.is_available()))
 
@@ -154,33 +212,33 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     # create stat
     model = RecurrentRGCN(args.decoder,
                           args.encoder,
-                        num_nodes,
-                        num_rels,
-                        num_static_rels,
-                        num_words,
-                        args.n_hidden,
-                        args.opn,
-                        sequence_len=args.train_history_len,
-                        num_bases=args.n_bases,
-                        num_basis=args.n_basis,
-                        num_hidden_layers=args.n_layers,
-                        dropout=args.dropout,
-                        self_loop=args.self_loop,
-                        skip_connect=args.skip_connect,
-                        layer_norm=args.layer_norm,
-                        input_dropout=args.input_dropout,
-                        hidden_dropout=args.hidden_dropout,
-                        feat_dropout=args.feat_dropout,
-                        aggregation=args.aggregation,
-                        weight=args.weight,
-                        discount=args.discount,
-                        angle=args.angle,
-                        use_static=args.add_static_graph,
-                        entity_prediction=args.entity_prediction,
-                        relation_prediction=args.relation_prediction,
-                        use_cuda=use_cuda,
-                        gpu = args.gpu,
-                        analysis=args.run_analysis)
+                            num_nodes,
+                            num_rels,
+                            num_static_rels,
+                            num_words,
+                            args.n_hidden,
+                            args.opn,
+                            sequence_len=args.train_history_len,
+                            num_bases=args.n_bases,
+                            num_basis=args.n_basis,
+                            num_hidden_layers=args.n_layers,
+                            dropout=args.dropout,
+                            self_loop=args.self_loop,
+                            skip_connect=args.skip_connect,
+                            layer_norm=args.layer_norm,
+                            input_dropout=args.input_dropout,
+                            hidden_dropout=args.hidden_dropout,
+                            feat_dropout=args.feat_dropout,
+                            aggregation=args.aggregation,
+                            weight=args.weight,
+                            discount=args.discount,
+                            angle=args.angle,
+                            use_static=args.add_static_graph,
+                            entity_prediction=args.entity_prediction,
+                            relation_prediction=args.relation_prediction,
+                            use_cuda=use_cuda,
+                            gpu = args.gpu,
+                            analysis=args.run_analysis)
 
     if use_cuda:
         torch.cuda.set_device(args.gpu)
@@ -192,7 +250,19 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
 
+    ##  eval_paper_authors
+    mrrs = []
+    epoch = 0
+    if args.multi_step:
+        print(' eval_paper_authors multistep multistep')
+        eval_paper_authors_multistep_bool =True
+    else:
+        print(' eval_paper_authors multistep not multistep')
+        eval_paper_authors_multistep_bool = False
+    ## END
+
     if args.test and os.path.exists(model_state_file):
+        print(args.dataset)
         mrr_raw, mrr_filter, mrr_raw_r, mrr_filter_r = test(model, 
                                                             train_list+valid_list, 
                                                             test_list, 
@@ -203,7 +273,11 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                                                             all_ans_list_r_test, 
                                                             model_state_file, 
                                                             static_graph, 
-                                                            "test")
+                                                            "test",
+                                                            log=True,
+                                                            eval_paper_authors_datasetname=args.dataset, #this line was added by  eval_paper_authors for logging
+                                                            eval_paper_authors_multistep_bool= eval_paper_authors_multistep_bool,  #this line was added by  eval_paper_authors for loggin
+                                                            eval_paper_authors_exp_nr=args.runnr) #this line was added by  eval_paper_authors for logging
     elif args.test and not os.path.exists(model_state_file):
         print("--------------{} not exist, Change mode to train and generate stat for testing----------------\n".format(model_state_file))
     else:
@@ -228,7 +302,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     input_list = train_list[train_sample_num - args.train_history_len:
                                         train_sample_num]
 
-                # generate history graph
+                # generate history graph 
                 history_glist = [build_sub_graph(num_nodes, num_rels, snap, use_cuda, args.gpu) for snap in input_list]
                 output = [torch.from_numpy(_).long().cuda() for _ in output] if use_cuda else [torch.from_numpy(_).long() for _ in output]
                 loss_e, loss_r, loss_static = model.get_loss(history_glist, output[0], static_graph, use_cuda)
@@ -246,7 +320,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
 
             print("Epoch {:04d} | Ave Loss: {:.4f} | entity-relation-static:{:.4f}-{:.4f}-{:.4f} Best MRR {:.4f} | Model {} "
                   .format(epoch, np.mean(losses), np.mean(losses_e), np.mean(losses_r), np.mean(losses_static), best_mrr, model_name))
-
+            
             # validation
             if epoch and epoch % args.evaluate_every == 0:
                 mrr_raw, mrr_filter, mrr_raw_r, mrr_filter_r = test(model, 
@@ -260,7 +334,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                                                                     model_state_file, 
                                                                     static_graph, 
                                                                     mode="train")
-                
+
                 if not args.relation_evaluation:  # entity prediction evalution
                     if mrr_raw < best_mrr:
                         if epoch >= args.n_epochs:
@@ -275,6 +349,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     else:
                         best_mrr = mrr_raw_r
                         torch.save({'state_dict': model.state_dict(), 'epoch': epoch}, model_state_file)
+
         mrr_raw, mrr_filter, mrr_raw_r, mrr_filter_r = test(model, 
                                                             train_list+valid_list,
                                                             test_list, 
@@ -290,9 +365,17 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
 
 
 if __name__ == '__main__':
+
+    n = 'RE-GCN'
+    log_dir = f'../../logs/{n}.log'
+    logging.basicConfig(filename=log_dir, filemode='a',
+                        format='%(asctime)s - %(message)s',
+                        datefmt='%d-%b-%y %H:%M:%S',
+                        level=logging.DEBUG) # #this  was added by  eval_paper_authors for logging
+
     parser = argparse.ArgumentParser(description='REGCN')
 
-    parser.add_argument("--gpu", type=int, default=-1,
+    parser.add_argument("--gpu", type=int, default=0,
                         help="gpu")
     parser.add_argument("--batch-size", type=int, default=1,
                         help="batch-size")
@@ -320,7 +403,7 @@ if __name__ == '__main__':
                         help="weight of static constraint")
     parser.add_argument("--task-weight", type=float, default=0.7,
                         help="weight of entity prediction task")
-    parser.add_argument("--discount", type=float, default=1,
+    parser.add_argument("--discount", type=float, default=1.0,
                         help="discount of weight of static constraint")
     parser.add_argument("--angle", type=int, default=10,
                         help="evolution speed")
@@ -348,9 +431,9 @@ if __name__ == '__main__':
                         help="perform layer normalization in every layer of gcn ")
     parser.add_argument("--layer-norm", action='store_true', default=False,
                         help="perform layer normalization in every layer of gcn ")
-    parser.add_argument("--relation-prediction", action='store_true', default=False,
+    parser.add_argument("--relation-prediction", action='store_true', default=True, #default=False, # changed evaluation_paper_authors
                         help="add relation prediction loss")
-    parser.add_argument("--entity-prediction", action='store_true', default=False,
+    parser.add_argument("--entity-prediction", action='store_true', default=True, #default=False, # changed evaluation_paper_authors
                         help="add entity prediction loss")
     parser.add_argument("--split_by_relation", action='store_true', default=False,
                         help="do relation prediction")
@@ -378,9 +461,9 @@ if __name__ == '__main__':
                         help="feat dropout for decoder")
 
     # configuration for sequences stat
-    parser.add_argument("--train-history-len", type=int, default=10,
+    parser.add_argument("--train-history-len", type=int,  default=3,  #6,# default=10, # changed evaluation_paper_authors
                         help="history length")
-    parser.add_argument("--test-history-len", type=int, default=20,
+    parser.add_argument("--test-history-len", type=int,  default=3, # 6,#default=20, # changed evaluation_paper_authors
                         help="history length for test")
     parser.add_argument("--dilate-len", type=int, default=1,
                         help="dilate history graph")
@@ -392,9 +475,14 @@ if __name__ == '__main__':
                         help="stat to use")
     parser.add_argument("--num-k", type=int, default=500,
                         help="number of triples generated")
+    ##ADDED  eval_paper_authors
+    # args for logging the scores
+    parser.add_argument("--runnr", default=0, type=int) 
 
+    ##END ADDED eval_paper_authors
 
     args = parser.parse_args()
+
     print(args)
     if args.grid_search:
         out_log = '{}.{}.gs'.format(args.dataset, args.encoder+"-"+args.decoder)
